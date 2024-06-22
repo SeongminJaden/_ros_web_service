@@ -7,8 +7,7 @@
       <div v-html="svgContent" class="floorplan" @click="handleClick"></div>
       <svg class="markers" viewBox="0 0 1000 500">
         <circle
-          v-for="(point, index) in points"
-          :key="index"
+          v-if="point"
           :cx="point.x"
           :cy="500 - point.y"
           r="5"
@@ -34,7 +33,7 @@
         svgContent: '',
         coordinates: null,
         selectedRoom: null,
-        points: [],
+        point: null, // Change to single object
         socket: null,
       };
     },
@@ -50,7 +49,9 @@
       async fetchCoordinates() {
         try {
           const response = await axios.get('http://localhost:3000/coordinates');
-          this.points = response.data;
+          if (response.data.length > 0) {
+            this.point = response.data[0];
+          }
         } catch (error) {
           console.error('Error fetching coordinates:', error);
         }
@@ -78,7 +79,7 @@
   
       this.socket = io('http://localhost:3000');
       this.socket.on('new-coordinate', (coordinate) => {
-        this.points.push(coordinate);
+        this.point = coordinate; // Update single coordinate
       });
     },
     beforeUnmount() {
