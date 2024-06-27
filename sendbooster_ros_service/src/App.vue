@@ -1,16 +1,16 @@
 <template>
   <div id="app">
-    <SvgMap />
+    <RobotMap />
   </div>
 </template>
 
 <script>
-import SvgMap from './components/SvgMap.vue';
+import RobotMap from './components/RobotMap.vue';
 
 export default {
   name: 'App',
   components: {
-    SvgMap,
+    RobotMap,
   },
 };
 </script>
@@ -25,3 +25,4 @@ export default {
   margin-top: 60px;
 }
 </style>
+
