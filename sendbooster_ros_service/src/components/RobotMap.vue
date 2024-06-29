@@ -3,6 +3,10 @@
     <header>
       <h1>sendbooster agv robot controller system</h1>
     </header>
+    <div class="toolbar">
+      <button @click="setMode('navigation')" :class="{ active: mode === 'navigation' }">Navigation Mode</button>
+      <button @click="setMode('wall')" :class="{ active: mode === 'wall' }">Wall Mode</button>
+    </div>
     <div class="content">
       <div class="map-container">
         <svg
@@ -10,8 +14,9 @@
           class="map-svg"
           ref="mapSvg"
           @mousedown="startDrawing"
-          @mousemove="drawRectangle"
+          @mousemove="drawLine"
           @mouseup="endDrawing"
+          @click="setNavGoalByClick"
         >
           <defs>
             <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
@@ -40,24 +45,22 @@
             r="3"
             fill="red"
           />
-          <rect
-            v-for="(rect, index) in rectangles"
+          <line
+            v-for="(line, index) in lines"
             :key="index"
-            :x="rect.x"
-            :y="rect.y"
-            :width="rect.width"
-            :height="rect.height"
-            fill="none"
+            :x1="line.x1"
+            :y1="line.y1"
+            :x2="line.x2"
+            :y2="line.y2"
             stroke="blue"
             stroke-dasharray="4"
           />
-          <rect
+          <line
             v-if="isDrawing"
-            :x="currentRect.x"
-            :y="currentRect.y"
-            :width="currentRect.width"
-            :height="currentRect.height"
-            fill="none"
+            :x1="currentLine.x1"
+            :y1="currentLine.y1"
+            :x2="currentLine.x2"
+            :y2="currentLine.y2"
             stroke="blue"
             stroke-dasharray="4"
           />
@@ -74,43 +77,43 @@
           <h2>Set 2D Pose Estimate</h2>
           <form @submit.prevent="setPose">
             <label for="x">X:</label>
-            <input type="number" v-model="pose.x" step="0.000000000000001" required />
+            <input type="number" v-model="pose.x" step="0.00001" required />
             <label for="y">Y:</label>
-            <input type="number" v-model="pose.y" step="0.000000000000001" required />
+            <input type="number" v-model="pose.y" step="0.00001" required />
             <label for="theta">Theta:</label>
-            <input type="number" v-model="pose.theta" step="0.000000000000001" required />
+            <input type="number" v-model="pose.theta" step="0.00001" required />
             <button type="submit">Set Pose</button>
           </form>
         </div>
         <div>
-          <h2>Rectangles</h2>
-          <div v-for="(rect, index) in rectangles" :key="index" class="rectangle-info">
+          <h2>Lines</h2>
+          <div v-for="(line, index) in lines" :key="index" class="line-info">
             <details>
-              <summary>Rectangle {{ index + 1 }}</summary>
+              <summary>Line {{ index + 1 }}</summary>
               <form>
-                <label for="rect_x">X:</label>
-                <input type="number" :value="convertToRobotCoords(rect).x" readonly />
-                <label for="rect_y">Y:</label>
-                <input type="number" :value="convertToRobotCoords(rect).y" readonly />
-                <label for="rect_width">Width:</label>
-                <input type="number" :value="convertToRobotCoords(rect).width" readonly />
-                <label for="rect_height">Height:</label>
-                <input type="number" :value="convertToRobotCoords(rect).height" readonly />
+                <label for="line_x1">X1:</label>
+                <input type="number" :value="convertToRobotCoords(line).x1" readonly />
+                <label for="line_y1">Y1:</label>
+                <input type="number" :value="convertToRobotCoords(line).y1" readonly />
+                <label for="line_x2">X2:</label>
+                <input type="number" :value="convertToRobotCoords(line).x2" readonly />
+                <label for="line_y2">Y2:</label>
+                <input type="number" :value="convertToRobotCoords(line).y2" readonly />
               </form>
             </details>
           </div>
-          <button @click="submitRectangles">Submit</button>
-          <button @click="removeAllRectangles">Remove All</button>
+          <button @click="submitLines">Submit</button>
+          <button @click="removeAllLines">Remove All</button>
         </div>
         <div>
           <h2>Set Navigation Goal</h2>
           <form @submit.prevent="setNavGoal">
             <label for="x_goal">X:</label>
-            <input type="number" v-model="navGoal.x" step="0.000000000000001" required />
+            <input type="number" v-model="navGoal.x" step="0.00001" required />
             <label for="y_goal">Y:</label>
-            <input type="number" v-model="navGoal.y" step="0.000000000000001" required />
+            <input type="number" v-model="navGoal.y" step="0.00001" required />
             <label for="theta_goal">Theta:</label>
-            <input type="number" v-model="navGoal.theta" step="0.000000000000001" required />
+            <input type="number" v-model="navGoal.theta" step="0.00001" required />
             <button type="submit">Set Nav Goal</button>
           </form>
         </div>
@@ -150,8 +153,9 @@ export default {
       notificationSocket: null,
       reconnectInterval: 5000,
       isDrawing: false,
-      currentRect: { x: 0, y: 0, width: 0, height: 0 },
-      rectangles: []
+      currentLine: { x1: 0, y1: 0, x2: 0, y2: 0 },
+      lines: [],
+      mode: 'navigation'  // 모드 추가
     };
   },
   computed: {
@@ -163,7 +167,7 @@ export default {
 
       const worldX = - this.robotPose.x - this.originX - offsetX
       const imageX = worldX / this.resolution
-      return parseFloat(imageX.toFixed(16))
+      return parseFloat(imageX.toFixed(5))
     },
     robotMarkerY() {
       if (!this.robotPose) return 0.0
@@ -173,7 +177,7 @@ export default {
 
       const worldY = - this.robotPose.y - this.originY - offsetY
       const imageY = this.mapHeight - (worldY / this.resolution)
-      return parseFloat(imageY.toFixed(16))
+      return parseFloat(imageY.toFixed(5))
     },
     navGoalMarkerX() {
       if (!this.navGoal) return 0.0
@@ -183,7 +187,7 @@ export default {
 
       const worldX = - this.navGoal.x - this.originX - offsetX
       const imageX = worldX / this.resolution
-      return parseFloat(imageX.toFixed(16))
+      return parseFloat(imageX.toFixed(5))
     },
     navGoalMarkerY() {
       if (!this.navGoal) return 0.0
@@ -193,7 +197,7 @@ export default {
 
       const worldY = - this.navGoal.y - this.originY - offsetY
       const imageY = this.mapHeight - (worldY / this.resolution)
-      return parseFloat(imageY.toFixed(16))
+      return parseFloat(imageY.toFixed(5))
     }
   },
   async created() {
@@ -210,14 +214,17 @@ export default {
     }
   },
   methods: {
+    setMode(newMode) {
+      this.mode = newMode
+    },
     async fetchMapInfo() {
       try {
         const response = await axios.get('http://localhost:8000/map_info')
         const mapData = response.data
         this.mapImage = 'http://localhost:8000/map_image'
-        this.resolution = parseFloat(mapData.resolution.toFixed(16))
-        this.originX = parseFloat(mapData.origin.x.toFixed(16))
-        this.originY = parseFloat(mapData.origin.y.toFixed(16))
+        this.resolution = parseFloat(mapData.resolution.toFixed(5))
+        this.originX = parseFloat(mapData.origin.x.toFixed(5))
+        this.originY = parseFloat(mapData.origin.y.toFixed(5))
         this.mapWidth = mapData.width
         this.mapHeight = mapData.height
 
@@ -237,14 +244,14 @@ export default {
         try {
           const data = JSON.parse(event.data)
           this.robotPose = {
-            x: parseFloat(data.pose.x.toFixed(16)),
-            y: parseFloat(data.pose.y.toFixed(16)),
-            z: parseFloat(data.pose.z.toFixed(16)),
+            x: parseFloat(data.pose.x.toFixed(5)),
+            y: parseFloat(data.pose.y.toFixed(5)),
+            z: parseFloat(data.pose.z.toFixed(5)),
             orientation: {
-              x: parseFloat(data.pose.orientation.x.toFixed(16)),
-              y: parseFloat(data.pose.orientation.y.toFixed(16)),
-              z: parseFloat(data.pose.orientation.z.toFixed(16)),
-              w: parseFloat(data.pose.orientation.w.toFixed(16))
+              x: parseFloat(data.pose.orientation.x.toFixed(5)),
+              y: parseFloat(data.pose.orientation.y.toFixed(5)),
+              z: parseFloat(data.pose.orientation.z.toFixed(5)),
+              w: parseFloat(data.pose.orientation.w.toFixed(5))
             }
           }
           this.velocity = data.velocity || this.velocity
@@ -286,19 +293,21 @@ export default {
       }
     },
     startDrawing(event) {
+      if (this.mode !== 'wall') return
+
       const svg = this.$refs.mapSvg;
       const pt = svg.createSVGPoint();
       pt.x = event.clientX;
       pt.y = event.clientY;
       const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
 
-      this.currentRect.x = svgP.x;
-      this.currentRect.y = svgP.y;
-      this.currentRect.width = 0;
-      this.currentRect.height = 0;
+      this.currentLine.x1 = svgP.x;
+      this.currentLine.y1 = svgP.y;
+      this.currentLine.x2 = svgP.x;
+      this.currentLine.y2 = svgP.y;
       this.isDrawing = true;
     },
-    drawRectangle(event) {
+    drawLine(event) {
       if (!this.isDrawing) return;
 
       const svg = this.$refs.mapSvg;
@@ -307,15 +316,19 @@ export default {
       pt.y = event.clientY;
       const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
 
-      this.currentRect.width = svgP.x - this.currentRect.x;
-      this.currentRect.height = svgP.y - this.currentRect.y;
+      this.currentLine.x2 = svgP.x;
+      this.currentLine.y2 = svgP.y;
     },
     endDrawing() {
+      if (!this.isDrawing) return
+
       this.isDrawing = false;
-      this.rectangles.push({ ...this.currentRect });
-      this.currentRect = { x: 0, y: 0, width: 0, height: 0 };
+      this.lines.push({ ...this.currentLine });
+      this.currentLine = { x1: 0, y1: 0, x2: 0, y2: 0 };
     },
     setNavGoalByClick(event) {
+      if (this.mode !== 'navigation') return
+
       const svg = this.$refs.mapSvg; // SVG 요소 참조
       const pt = svg.createSVGPoint(); // SVG 포인트 객체 생성
 
@@ -336,23 +349,23 @@ export default {
       const worldY = (svgP.y * this.resolution) + this.originY;
 
       // 변환된 좌표를 navGoal에 설정
-      this.navGoal.x = parseFloat(worldX.toFixed(16));
-      this.navGoal.y = parseFloat(worldY.toFixed(16));
+      this.navGoal.x = parseFloat(worldX.toFixed(5));
+      this.navGoal.y = parseFloat(worldY.toFixed(5));
       this.goalSet = false; // 클릭 시 goalSet을 false로 설정하여 빨간색 마커 표시
 
       // 변환된 좌표를 콘솔에 출력합니다.
       console.log(`Mapped coordinates: x=${this.navGoal.x}, y=${this.navGoal.y}`);
     },
-    convertToRobotCoords(rect) {
-      const worldX = ((this.mapWidth - rect.x) * this.resolution) + this.originX;
-      const worldY = (rect.y * this.resolution) + this.originY;
-      const width = rect.width * this.resolution;
-      const height = rect.height * this.resolution;
+    convertToRobotCoords(line) {
+      const worldX1 = ((this.mapWidth - line.x1) * this.resolution) + this.originX;
+      const worldY1 = (line.y1 * this.resolution) + this.originY;
+      const worldX2 = ((this.mapWidth - line.x2) * this.resolution) + this.originX;
+      const worldY2 = (line.y2 * this.resolution) + this.originY;
       return {
-        x: parseFloat(worldX.toFixed(6)),
-        y: parseFloat(worldY.toFixed(6)),
-        width: parseFloat(width.toFixed(6)),
-        height: parseFloat(height.toFixed(6))
+        x1: parseFloat(worldX1.toFixed(5)),
+        y1: parseFloat(worldY1.toFixed(5)),
+        x2: parseFloat(worldX2.toFixed(5)),
+        y2: parseFloat(worldY2.toFixed(5))
       };
     },
     async setPose() {
@@ -373,24 +386,30 @@ export default {
         alert('Failed to set navigation goal')
       }
     },
-    async submitRectangles() {
-      const forbiddenZones = this.rectangles.map(rect => this.convertToRobotCoords(rect));
+    async submitLines() {
+      const lines = this.lines.map(line => this.convertToRobotCoords(line));
+      console.log(lines.length)
+      if(lines.length > 0){
       try {
-        await axios.post('http://localhost:8000/set_forbidden_zones', forbiddenZones);
-        alert(`Number of forbidden zones set: ${this.rectangles.length}`);
+        await axios.post('http://localhost:8000/set_walls', lines);
+        alert(`Number of walls set: ${this.lines.length}`);
       } catch (error) {
         console.error(error);
-        alert('Failed to set forbidden zones');
+        alert('Failed to set walls');
       }
+    }
+    else {
+      alert("Set obstacles first")
+    }
     },
-    async removeAllRectangles() {
+    async removeAllLines() {
       try {
-        await axios.post('http://localhost:8000/clear_forbidden_zones');
-        this.rectangles = [];
-        alert('All forbidden zones cleared');
+        await axios.post('http://localhost:8000/clear_walls');
+        this.lines = [];
+        alert('All walls cleared');
       } catch (error) {
         console.error(error);
-        alert('Failed to clear forbidden zones');
+        alert('Failed to clear walls');
       }
     }
   }
@@ -410,6 +429,21 @@ export default {
 header {
   text-align: center;
   margin-bottom: 20px;
+}
+
+.toolbar {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.toolbar button {
+  margin: 0 10px;
+  padding: 10px 20px;
+}
+
+.toolbar button.active {
+  background-color: #42b983;
+  color: white;
 }
 
 .content {
@@ -452,7 +486,7 @@ button {
   margin-top: 10px;
 }
 
-.rectangle-info {
+.line-info {
   margin-bottom: 10px;
 }
 </style>
