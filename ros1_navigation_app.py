@@ -1,6 +1,8 @@
 import rospy
+import os
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
+from turtlesim.msg import Pose as TurtleSimPose
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,6 +16,7 @@ import math
 import io
 import asyncio
 import json
+from skimage.draw import polygon  # skimage.draw의 polygon 함수 사용
 
 app = FastAPI()
 
@@ -55,15 +58,21 @@ class NavigationServer:
         self.map_data = None
         self.robot_pose = None
         self.robot_velocity = None
+        self.turtle_pose = None
+        self.original_map_data = None
         self.forbidden_zones = []
         rospy.Subscriber('map', OccupancyGrid, self.map_callback)
         rospy.Subscriber('amcl_pose', PoseWithCovarianceStamped, self.pose_callback)
         rospy.Subscriber('cmd_vel', Twist, self.velocity_callback)
+        rospy.Subscriber('/turtle1/pose', TurtleSimPose, self.turtle_pose_callback)
         self.pose_publisher = rospy.Publisher('/initialpose', PoseWithCovarianceStamped, queue_size=10)
         self.goal_publisher = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size=10)
+        self.map_update_publisher = rospy.Publisher('/map', OccupancyGrid, queue_size=10, latch=True)
 
     def map_callback(self, msg):
         self.map_data = msg
+        if self.original_map_data is None:
+            self.original_map_data = msg  # 원래 맵 데이터 저장
         rospy.loginfo(f"Map Origin: {msg.info.origin.position.x}, {msg.info.origin.position.y}")
         rospy.loginfo(f"Map Resolution: {msg.info.resolution}")
 
@@ -72,6 +81,9 @@ class NavigationServer:
 
     def velocity_callback(self, msg):
         self.robot_velocity = msg
+
+    def turtle_pose_callback(self, msg):
+        self.turtle_pose = msg
 
     def get_map_info(self):
         if self.map_data:
@@ -84,23 +96,23 @@ class NavigationServer:
                 'resolution': self.map_data.info.resolution,
                 'width': self.map_data.info.width,
                 'height': self.map_data.info.height,
-                'map_image': self.save_map_image()  # 이미지 파일 경로 반환
+                'map_image': self.save_map_image(self.map_data)  # 이미지 파일 경로 반환
             }
             return map_info
         else:
             return None
 
-    def save_map_image(self):
-        if self.map_data:
-            map_array = np.array(self.map_data.data).reshape((self.map_data.info.height, self.map_data.info.width))
+    def save_map_image(self, map_data, filename="/tmp/map_with_grid.png"):
+        if map_data:
+            map_array = np.array(map_data.data).reshape((map_data.info.height, map_data.info.width))
             
             # 새로운 이미지를 생성
-            map_image = Image.new('RGB', (self.map_data.info.width, self.map_data.info.height))
+            map_image = Image.new('RGB', (map_data.info.width, map_data.info.height))
             draw = ImageDraw.Draw(map_image)
             
             # 픽셀 값에 따라 색상 설정
-            for y in range(self.map_data.info.height):
-                for x in range(self.map_data.info.width):
+            for y in range(map_data.info.height):
+                for x in range(map_data.info.width):
                     if map_array[y, x] == -1:
                         color = (255, 255, 255)  # 미탐색: 흰색
                     elif map_array[y, x] == 0:
@@ -113,9 +125,8 @@ class NavigationServer:
             map_image = ImageOps.mirror(map_image)
         
             
-            output_filename = "/tmp/map_with_grid.png"
-            map_image.save(output_filename)
-            return output_filename
+            map_image.save(filename)
+            return filename
         else:
             return None
 
@@ -162,6 +173,25 @@ class NavigationServer:
         else:
             return None
 
+    def get_turtle_pose(self):
+        if self.turtle_pose:
+            pose = {
+                'x': self.turtle_pose.x,
+                'y': self.turtle_pose.y,
+                'theta': self.turtle_pose.theta
+            }
+            return pose
+        else:
+            return None
+
+    def get_turtle_pose_json(self):
+        pose = self.get_turtle_pose()
+        if pose:
+            pose_json = json.dumps(pose)
+            return pose_json
+        else:
+            return json.dumps({"error": "Turtle pose not available"})
+
     def set_initial_pose(self, x, y, theta):
         pose_msg = PoseWithCovarianceStamped()
         pose_msg.header.stamp = rospy.Time.now()
@@ -197,16 +227,70 @@ class NavigationServer:
 
         rospy.loginfo(f"Setting navigation goal: x={x}, y={y}, theta={theta}")
         self.goal_publisher.publish(goal_msg)
-    
-    def set_forbidden_zones(self, zones):
-        self.forbidden_zones = zones
-        rospy.loginfo(f"Setting forbidden zones: {zones}")
-        # 여기에 출입 금지 구역을 실제 네비게이션에 적용하는 로직을 추가합니다.
-    
-    def clear_forbidden_zones(self):
+
+    def set_walls(self, lines):
+        self.forbidden_zones = lines
+        self.update_obstacles()
+        self.publish_updated_map()
+
+    def clear_walls(self):
         self.forbidden_zones = []
-        rospy.loginfo("Cleared all forbidden zones")
-        # 여기에 출입 금지 구역을 실제 네비게이션에서 제거하는 로직을 추가합니다.
+        self.map_data = self.original_map_data  # 원래 맵 데이터로 되돌리기
+        self.reload_map()
+        rospy.loginfo("Cleared all walls and restored original map")
+
+    def update_obstacles(self):
+        if self.map_data:
+            grid = np.array(self.map_data.data).reshape((self.map_data.info.height, self.map_data.info.width))
+            thickness = 1  # 선의 두께 설정
+
+            for line in self.forbidden_zones:
+                x1, y1 = self.map_to_grid_coords(line['x1'], line['y1'])
+                x2, y2 = self.map_to_grid_coords(line['x2'], line['y2'])
+
+                # 선을 두껍게 그리기 위해 사각형 영역을 생성
+                for t in range(-thickness, thickness + 1):
+                    rr, cc = polygon([y1 + t, y2 + t, y2 - t, y1 - t], [x1 - t, x2 - t, x2 + t, x1 + t])
+                    valid_rr = np.clip(rr, 0, grid.shape[0] - 1)
+                    valid_cc = np.clip(cc, 0, grid.shape[1] - 1)
+                    grid[valid_rr, valid_cc] = 100
+
+            grid_msg = OccupancyGrid()
+            grid_msg.header.stamp = rospy.Time.now()
+            grid_msg.header.frame_id = "map"
+            grid_msg.info = self.map_data.info
+            grid_msg.data = grid.flatten().tolist()
+
+            self.map_data.data = grid_msg.data  # 맵 데이터 업데이트
+            self.save_map(self.map_data, filename="/home/seongmin/update_map.pgm")  # 업데이트된 맵 저장
+            self.save_map_image(self.map_data, filename="/tmp/update_map_with_grid.png")  # 업데이트된 맵 이미지 저장
+            self.publish_updated_map()
+
+            rospy.loginfo("Updated map with new obstacles")
+
+    def map_to_grid_coords(self, x, y):
+        gx = int((x - self.map_data.info.origin.position.x) / self.map_data.info.resolution)
+        gy = int((y - self.map_data.info.origin.position.y) / self.map_data.info.resolution)
+        return gx, gy
+
+    def save_map(self, map_data, filename="/home/seongmin/map.pgm"):
+        map_array = np.array(map_data.data).reshape((map_data.info.height, map_data.info.width))
+        map_array = 255 - ((map_array + 1) * 127.5 / 100).astype(np.uint8)  # OccupancyGrid 데이터 변환
+
+        with open(filename, 'wb') as f:
+            f.write(b'P5\n%d %d\n255\n' % (map_data.info.width, map_data.info.height))
+            map_array.tofile(f)
+
+        rospy.loginfo(f"Map saved to {filename}")
+
+    def publish_updated_map(self):
+        if self.map_data:
+            self.map_update_publisher.publish(self.map_data)
+            rospy.loginfo("Published updated map to /map topic")
+
+    def reload_map(self):
+        os.system("rosrun map_server map_server /home/seongmin/map.yaml &")
+        rospy.loginfo("Reloaded map with updated obstacles")
 
 nav_server = NavigationServer()
 
@@ -215,11 +299,11 @@ class Pose(BaseModel):
     y: float
     theta: float  # degrees
 
-class ForbiddenZone(BaseModel):
-    x: float
-    y: float
-    width: float
-    height: float
+class Line(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
 
 @app.post("/set_pose/")
 def set_pose(pose: Pose):
@@ -233,15 +317,23 @@ def set_nav_goal(pose: Pose):
     nav_server.set_nav_goal(pose.x, pose.y, theta_rad)
     return {"message": "Navigation goal set successfully"}
 
-@app.post("/set_forbidden_zones/")
-def set_forbidden_zones(zones: List[ForbiddenZone]):
-    nav_server.set_forbidden_zones(zones)
-    return {"message": "Forbidden zones set successfully"}
+@app.post("/set_walls/")
+def set_walls(lines: List[Line]):
+    nav_server.set_walls([line.dict() for line in lines])
+    return {"message": "Walls set successfully"}
 
-@app.post("/clear_forbidden_zones/")
-def clear_forbidden_zones():
-    nav_server.clear_forbidden_zones()
-    return {"message": "All forbidden zones cleared"}
+@app.post("/clear_walls/")
+def clear_walls():
+    nav_server.clear_walls()
+    return {"message": "Walls cleared successfully"}
+
+@app.get("/get_sim_pose")
+def get_sim_pose():
+    pose = nav_server.get_turtle_pose()
+    if pose:
+        return pose
+    else:
+        raise HTTPException(status_code=404, detail="Turtle pose not available")
 
 @app.get("/map_info")
 def map_info():
@@ -253,7 +345,7 @@ def map_info():
 
 @app.get("/map_image")
 def map_image():
-    map_path = nav_server.save_map_image()
+    map_path = nav_server.save_map_image(nav_server.map_data)
     if map_path:
         with open(map_path, "rb") as f:
             return Response(content=f.read(), media_type="image/png")
@@ -287,3 +379,7 @@ async def notify_endpoint(websocket: WebSocket):
 
 def ros_spin():
     rospy.spin()
+
+if __name__ == "__main__":
+    Thread(target=ros_spin).start()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
