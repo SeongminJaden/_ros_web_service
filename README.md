@@ -1,4 +1,4 @@
-# sentbooster_ros_web_service
+# _ros_web_service
 
 API 엔드포인트</br>
 /set_pose/: 초기 포즈를 설정합니다.</br>
