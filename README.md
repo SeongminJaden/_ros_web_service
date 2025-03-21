@@ -1,5 +1,9 @@
 # _ros_web_service
+https://github.com/SeongminJaden/agv_urdf_ros2_gazebo
 
+### 이 repo는 AGV ros2 web service 패키지로 vue.js기반 SLAM-navigation이 가능하도록 개발되었습니다.
+API엔드포인트 사용방법은 아래와 같습니다.</br>
+시뮬레이션은 ROBOTIS사의 turtlebot3 SIM을 기반으로 구현되었습니다.</br>
 API 엔드포인트</br>
 /set_pose/: 초기 포즈를 설정합니다.</br>
 
