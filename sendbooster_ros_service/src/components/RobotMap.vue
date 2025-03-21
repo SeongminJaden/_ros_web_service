@@ -1,7 +1,7 @@
 <template>
   <div id="app">
     <header>
-      <h1>sendbooster agv robot controller system</h1>
+      <h1>agv robot controller system</h1>
     </header>
     <div class="toolbar">
       <button @click="setMode('navigation')" :class="{ active: mode === 'navigation' }">Navigation Mode</button>
